@@ -226,8 +226,12 @@ pub fn is_valid_snippet(text: &str) -> bool {
 }
 
 /// Validates that `path` is a non-empty `.exe`, `.lnk`, `.desktop`, or `.appimage`
-/// file path, or a binary in a standard Linux application directory on the PC.
+/// file path, or a direct binary in an absolute directory listed in `PATH`.
 pub fn is_valid_app_path(path: &str) -> bool {
+    is_valid_app_path_with_env(path, std::env::var_os("PATH").as_deref())
+}
+
+fn is_valid_app_path_with_env(path: &str, path_env: Option<&std::ffi::OsStr>) -> bool {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_PATH_BYTES || trimmed.chars().any(char::is_control) {
         return false;
@@ -242,21 +246,41 @@ pub fn is_valid_app_path(path: &str) -> bool {
             return !file_stem.is_empty();
         }
     }
-    for dir in ["/usr/bin/", "/usr/local/bin/", "/snap/bin/", "/var/lib/flatpak/exports/bin/"] {
-        if let Some(name) = trimmed.strip_prefix(dir) {
-            let lower_name = name.to_ascii_lowercase();
-            let is_shell = matches!(
-                lower_name.as_str(),
-                "sh" | "bash" | "dash" | "zsh" | "fish" | "csh" | "tcsh" | "ksh"
-            );
-            return !name.is_empty()
-                && name != "."
-                && !name.contains(['/', '\\'])
-                && !lower_name.ends_with(".sh")
-                && !is_shell;
-        }
+    let Some((parent, name)) = trimmed.rsplit_once('/') else {
+        return false;
+    };
+    let lower_name = name.to_ascii_lowercase();
+    let is_shell =
+        matches!(lower_name.as_str(), "sh" | "bash" | "dash" | "zsh" | "fish" | "csh" | "tcsh" | "ksh");
+    if parent.is_empty()
+        || name.is_empty()
+        || name == "."
+        || name.contains(['/', '\\'])
+        || lower_name.ends_with(".sh")
+        || is_shell
+    {
+        return false;
     }
-    false
+    let Some(path_env) = path_env else {
+        return false;
+    };
+    std::env::split_paths(path_env)
+        .filter_map(|p| p.into_os_string().into_string().ok())
+        .any(|entry| is_trusted_unix_path_dir(&entry) && entry.trim_end_matches('/') == parent)
+}
+
+fn is_trusted_unix_path_dir(dir: &str) -> bool {
+    let normalized = dir.trim_end_matches('/');
+    if !normalized.starts_with('/') || normalized.len() <= 1 || normalized.chars().any(char::is_control) {
+        return false;
+    }
+    if normalized.split('/').skip(1).any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return false;
+    }
+    !matches!(normalized, "/tmp" | "/var/tmp" | "/dev/shm")
+        && !normalized.starts_with("/tmp/")
+        && !normalized.starts_with("/var/tmp/")
+        && !normalized.starts_with("/dev/shm/")
 }
 
 /// Validates a command string for `RunCommand`.
@@ -773,17 +797,37 @@ mod tests {
         assert!(!DeckAction::OpenUrl { url: "file:///C:/Windows/System32/cmd.exe".into() }.is_valid());
         assert!(!DeckAction::OpenUrl { url: "ftp://example.com".into() }.is_valid());
 
-        assert!(DeckAction::LaunchApp { path: r"C:\Windows\System32\calc.exe".into() }.is_valid());
-        assert!(DeckAction::LaunchApp { path: r"C:\Users\me\Desktop\OBS Studio.LNK".into() }.is_valid());
-        assert!(DeckAction::LaunchApp { path: "/usr/bin/firefox".into() }.is_valid());
-        assert!(DeckAction::LaunchApp { path: "org.mozilla.firefox.desktop".into() }.is_valid());
-        assert!(DeckAction::LaunchApp { path: "/opt/app/MyApp.AppImage".into() }.is_valid());
-        assert!(!DeckAction::LaunchApp { path: "/usr/local/bin/start.sh".into() }.is_valid());
-        assert!(!DeckAction::LaunchApp { path: "/usr/bin/sh".into() }.is_valid());
-        assert!(!DeckAction::LaunchApp { path: "/usr/bin/bash".into() }.is_valid());
-        assert!(!DeckAction::LaunchApp { path: "/etc/passwd".into() }.is_valid());
-        assert!(!DeckAction::LaunchApp { path: r"C:\scripts\evil.bat".into() }.is_valid());
-        assert!(!DeckAction::LaunchApp { path: r"C:\scripts\evil.ps1".into() }.is_valid());
+        #[cfg(windows)]
+        {
+            assert!(DeckAction::LaunchApp { path: r"C:\Windows\System32\calc.exe".into() }.is_valid());
+            assert!(DeckAction::LaunchApp { path: r"C:\Users\me\Desktop\OBS Studio.LNK".into() }.is_valid());
+            assert!(!DeckAction::LaunchApp { path: r"C:\scripts\evil.bat".into() }.is_valid());
+            assert!(!DeckAction::LaunchApp { path: r"C:\scripts\evil.ps1".into() }.is_valid());
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert!(DeckAction::LaunchApp { path: "/usr/bin/firefox".into() }.is_valid());
+            assert!(DeckAction::LaunchApp { path: "org.mozilla.firefox.desktop".into() }.is_valid());
+            assert!(DeckAction::LaunchApp { path: "/opt/app/MyApp.AppImage".into() }.is_valid());
+            assert!(!DeckAction::LaunchApp { path: "/usr/local/bin/start.sh".into() }.is_valid());
+            assert!(!DeckAction::LaunchApp { path: "/usr/bin/sh".into() }.is_valid());
+            assert!(!DeckAction::LaunchApp { path: "/usr/bin/bash".into() }.is_valid());
+            assert!(!DeckAction::LaunchApp { path: "/etc/passwd".into() }.is_valid());
+
+            let custom_path = std::ffi::OsStr::new(
+                "/home/alice/.local/bin:/run/current-system/sw/bin:/usr/games::.:/tmp:/var/tmp/sub:/dev/shm:/usr/../etc:/",
+            );
+            assert!(is_valid_app_path_with_env("/home/alice/.local/bin/obsidian", Some(custom_path)));
+            assert!(is_valid_app_path_with_env("/run/current-system/sw/bin/alacritty", Some(custom_path)));
+            assert!(is_valid_app_path_with_env("/usr/games/steam", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("/home/alice/.local/bin/zsh", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("/home/alice/.local/bin/deploy.sh", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("/tmp/payload", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("/var/tmp/sub/payload", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("/dev/shm/payload", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("./payload", Some(custom_path)));
+            assert!(!is_valid_app_path_with_env("/payload", Some(custom_path)));
+        }
         assert!(!DeckAction::LaunchApp { path: ".exe".into() }.is_valid());
         assert!(!DeckAction::LaunchApp { path: ".desktop".into() }.is_valid());
         assert!(!DeckAction::LaunchApp { path: "../bin/sh".into() }.is_valid());
