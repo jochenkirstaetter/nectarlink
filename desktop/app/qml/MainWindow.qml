@@ -125,9 +125,9 @@ NativeWindow {
 
     function screenKey(s) {
         if (!s) return ""
-        if (s.name && s.name.length > 0) return s.name
         const parts = [s.manufacturer || "", s.model || "", s.serialNumber || ""].filter(function(p) { return p.length > 0 })
-        return parts.join(":")
+        if (parts.length > 0) return parts.join(":")
+        return s.name || ""
     }
 
     function findScreen(ident) {
