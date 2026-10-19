@@ -156,20 +156,16 @@ NativeWindow {
         return (s && s.virtualY !== undefined) ? s.virtualY : 0
     }
 
+    // A screen's own size. Its desktopAvailable* properties cover the whole
+    // virtual desktop, which spans every monitor.
     function screenAvailWidth(s) {
-        if (s) {
-            if (s.desktopAvailableWidth !== undefined && s.desktopAvailableWidth > 0) return s.desktopAvailableWidth
-            if (s.width !== undefined && s.width > 0) return s.width
-        }
-        return Screen.desktopAvailableWidth > 0 ? Screen.desktopAvailableWidth : (Screen.width > 0 ? Screen.width : 1920)
+        if (s && s.width > 0) return s.width
+        return Screen.width > 0 ? Screen.width : 1920
     }
 
     function screenAvailHeight(s) {
-        if (s) {
-            if (s.desktopAvailableHeight !== undefined && s.desktopAvailableHeight > 0) return s.desktopAvailableHeight
-            if (s.height !== undefined && s.height > 0) return s.height
-        }
-        return Screen.desktopAvailableHeight > 0 ? Screen.desktopAvailableHeight : (Screen.height > 0 ? Screen.height : 1080)
+        if (s && s.height > 0) return s.height
+        return Screen.height > 0 ? Screen.height : 1080
     }
 
     function currentScreen() {
@@ -181,8 +177,8 @@ NativeWindow {
                 const s = screens[i]
                 const sx = screenOriginX(s)
                 const sy = screenOriginY(s)
-                const sw = s.width > 0 ? s.width : screenAvailWidth(s)
-                const sh = s.height > 0 ? s.height : screenAvailHeight(s)
+                const sw = screenAvailWidth(s)
+                const sh = screenAvailHeight(s)
                 if (cx >= sx && cx < sx + sw && cy >= sy && cy < sy + sh) {
                     return s
                 }
